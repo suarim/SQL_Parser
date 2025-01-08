@@ -1,0 +1,362 @@
+package query_transformer
+
+import (
+	"fmt"
+	"testing"
+	"vitess.io/vitess/go/vt/sqlparser"
+)
+
+func TestQueryParser_ParseAndTransform(t *testing.T) {
+	testMetadata := map[string]*ObjectMetadata{
+		"users": {
+			ObjectSlug:   "users",
+			PhysicalName: "user_master",
+			IsPublic:     false,
+			ObjectID:     "usr_123",
+			Columns: map[string]*ColumnMetadata{
+				"id": {
+					Slug:         "id",
+					PhysicalName: "user_id",
+				},
+				"spending": {
+					Slug:         "spending",
+					PhysicalName: "total_spend",
+				},
+				"budget": {
+					Slug:         "budget",
+					PhysicalName: "spend_limit",
+				},
+				"status": {
+					Slug:         "status",
+					PhysicalName: "user_status",
+				},
+				"name": {
+					Slug:         "name",
+					PhysicalName: "user_name",
+				},
+				"orders": {
+					Slug:         "orders",
+					PhysicalName: "user_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "orders",
+						ColumnSlug: "user_id",
+						IsVirtual:  true,
+					},
+				},
+			},
+		},
+		"orders": {
+			ObjectSlug:   "orders",
+			PhysicalName: "order_details",
+			IsPublic:     true,
+			Columns: map[string]*ColumnMetadata{
+
+				"amount": {
+					Slug:         "amount",
+					PhysicalName: "order_amount",
+				},
+				"status": {
+					Slug:         "status",
+					PhysicalName: "order_status",
+				},
+				"id": {
+					Slug:         "id",
+					PhysicalName: "order_id",
+				},
+				"user_id": {
+					Slug:         "user_id",
+					PhysicalName: "user_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "users",
+						ColumnSlug: "id",
+						IsVirtual:  false, // Direct because this table has the FK
+					},
+				},
+				"items": {
+					Slug:         "items",
+					PhysicalName: "order_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "items",
+						ColumnSlug: "order_id",
+						IsVirtual:  true,
+					},
+				},
+			},
+		},
+		"items": {
+			ObjectSlug:   "items",
+			PhysicalName: "order_item_details",
+			IsPublic:     true,
+			Columns: map[string]*ColumnMetadata{
+				"id": {
+					Slug:         "id",
+					PhysicalName: "item_id",
+				},
+				"order_id": {
+					Slug:         "order_id",
+					PhysicalName: "order_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "orders",
+						ColumnSlug: "id",
+						IsVirtual:  false, // Direct because items has FK to orders
+					},
+				},
+				"product_id": {
+					Slug:         "product_id",
+					PhysicalName: "product_id",
+				},
+				"quantity": {
+					Slug:         "quantity",
+					PhysicalName: "item_quantity",
+				},
+				"category": {
+					Slug:         "category",
+					PhysicalName: "category_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "categories",
+						ColumnSlug: "id",
+						IsVirtual:  false, // Direct because items has FK to categories
+					},
+				},
+			},
+		},
+		"categories": {
+			ObjectSlug:   "categories",
+			PhysicalName: "category_master",
+			IsPublic:     true,
+			Columns: map[string]*ColumnMetadata{
+				"id": {
+					Slug:         "id",
+					PhysicalName: "category_id",
+				},
+				"name": {
+					Slug:         "name",
+					PhysicalName: "category_name",
+				},
+				"items": {
+					Slug:         "items",
+					PhysicalName: "category_id",
+					Relation: &RelationMetadata{
+						ObjectSlug: "items",
+						ColumnSlug: "category",
+						IsVirtual:  true, // Virtual because items has FK to categories
+					},
+				},
+			},
+		},
+	}
+
+	permContext := &PermissionContext{
+		OrgID:            "org_123",
+		OwnerIDs:         []string{"owner1", "owner2"},
+		CheckPermissions: true,
+	}
+
+	testCases := []struct {
+		name          string
+		query         string
+		metadata      map[string]*ObjectMetadata
+		permContext   *PermissionContext
+		want          *QueryInfo
+		wantErr       bool
+		expectedQuery string
+	}{
+		{
+			name: "Simple Select",
+			query: `
+        SELECT id, status
+        FROM users
+        WHERE status = 'active'`,
+			metadata:      testMetadata,
+			expectedQuery: `select user_master.user_id, user_master.user_status from user_master where user_master.user_id in (select distinct user_master.user_id as id from user_master where user_master.user_status = 'active')`,
+		},
+		{
+			name: "Simple Join",
+			query: `
+                SELECT users.id
+                FROM users
+                WHERE orders.amount > 100`,
+			metadata:      testMetadata,
+			expectedQuery: `select user_master.user_id from user_master where user_master.user_id in ( select distinct user_master.user_id as id from user_master join order_details on order_details.user_id = user_master.id where order_details.order_amount > 100 )`,
+		},
+		{
+			name: "Private Object Query with Permissions",
+			query: `
+                SELECT users.id, users.status
+                FROM users
+                WHERE users.status = 'active'`,
+			metadata:    testMetadata,
+			permContext: permContext,
+			expectedQuery: `SELECT user_master.user_id, user_master.user_status 
+                FROM user_master 
+                WHERE user_master.id IN (
+                    SELECT DISTINCT user_master.id 
+                    FROM user_master 
+                    WHERE user_master.user_status = 'active' 
+                    AND EXISTS (
+                        SELECT 1 
+                        FROM record_ownership ro 
+                        WHERE ro.record_id = user_master.id 
+                        AND ro.org_id = 'org_123' 
+                        AND ro.object_id = 'usr_123' 
+                        AND ro.owner IN ('owner1', 'owner2') 
+                        AND (ro.expires_at IS NULL OR ro.expires_at > EXTRACT(EPOCH FROM NOW()))
+                    )
+                )`,
+		},
+		{
+			name: "Public Object Query",
+			query: `
+                SELECT amount, status
+                FROM orders
+                WHERE amount > 100`,
+			metadata:    testMetadata,
+			permContext: permContext,
+			expectedQuery: `SELECT order_details.order_amount, order_details.order_status 
+                FROM order_details 
+                WHERE order_details.id IN (
+                    SELECT DISTINCT order_details.id 
+                    FROM order_details 
+                    WHERE order_details.order_amount > 100
+                )`,
+		},
+		{
+			name: "Join Private and Public Objects",
+			query: `
+                SELECT users.id, orders.amount
+                FROM users
+                JOIN orders ON orders.user_id = users.id
+                WHERE users.status = 'active' AND orders.amount > 100`,
+			metadata:    testMetadata,
+			permContext: permContext,
+			expectedQuery: `SELECT user_master.user_id, order_details.order_amount 
+                FROM user_master 
+                JOIN order_details ON order_details.user_id = user_master.id 
+                WHERE user_master.id IN (
+                    SELECT DISTINCT user_master.id 
+                    FROM user_master 
+                    JOIN order_details ON order_details.user_id = user_master.id 
+                    WHERE user_master.user_status = 'active' 
+                    AND order_details.order_amount > 100 
+                    AND EXISTS (
+                        SELECT 1 
+                        FROM record_ownership ro 
+                        WHERE ro.record_id = user_master.id 
+                        AND ro.org_id = 'org_123' 
+                        AND ro.object_id = 'usr_123' 
+                        AND ro.owner IN ('owner1', 'owner2') 
+                        AND (ro.expires_at IS NULL OR ro.expires_at > EXTRACT(EPOCH FROM NOW()))
+                    )
+                )`,
+		},
+		{
+			name: "No Permission Check",
+			query: `
+                SELECT id, status
+                FROM users
+                WHERE status = 'active'`,
+			metadata: testMetadata,
+			permContext: &PermissionContext{
+				CheckPermissions: false,
+			},
+			expectedQuery: `SELECT user_master.user_id, user_master.user_status 
+                FROM user_master 
+                WHERE user_master.id IN (
+                    SELECT DISTINCT user_master.id 
+                    FROM user_master 
+                    WHERE user_master.user_status = 'active'
+                )`,
+		},
+		{
+			name: "Three Level Join Query",
+			query: `
+                SELECT name, orders.amount, orders.items.quantity
+                FROM users 
+                WHERE orders.items.quantity > 5
+            `,
+			metadata: testMetadata,
+			permContext: &PermissionContext{
+				CheckPermissions: false,
+			},
+			expectedQuery: `
+                SELECT user_master.user_name, order_details.order_amount, order_item_details.item_quantity
+                FROM user_master
+                WHERE user_master.user_id IN (
+                    SELECT DISTINCT user_master.user_id
+                    FROM user_master
+                    JOIN order_details ON order_details.user_id = user_master.user_id
+                    JOIN order_item_details ON order_item_details.order_id = order_details.order_id
+                    WHERE order_item_details.item_quantity > 5
+                )
+            `,
+		},
+		{
+			name:     "Four Level Join Query",
+			query:    "SELECT name FROM users WHERE `orders.items.category.name` = 'Electronics'",
+			metadata: testMetadata,
+			permContext: &PermissionContext{
+				CheckPermissions: false,
+			},
+			expectedQuery: `SELECT user_master.user_name, order_details.order_amount, category_master.category_name
+FROM user_master
+WHERE user_master.user_id IN (
+    SELECT DISTINCT user_master.user_id
+    FROM user_master
+    JOIN order_details ON order_details.user_id = user_master.user_id
+    JOIN order_item_details ON order_item_details.order_id = order_details.order_id
+    JOIN category_master ON category_master.category_id = order_item_details.category_id
+    WHERE category_master.category_name = 'Electronics'
+)`,
+		},
+	}
+
+	parser := sqlparser.NewTestParser()
+	d, err := parser.Parse("SELECT name, orders.amount, `orders.items.category.name` \nFROM users \nWHERE `orders.items.category.name` = 'Electronics'")
+	fmt.Println(err)
+	fmt.Println(" ats ", d)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fmt.Printf("\nProcessing test case: %s\n", tc.name)
+			fmt.Printf("Original query:\n%s\n", tc.query)
+
+			parser := NewQueryParser(tc.metadata, tc.permContext)
+			got, err := parser.ParseAndTransform(tc.query)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ParseAndTransform() error = %v, wantErr %v", err, tc.wantErr)
+				return
+			}
+
+			// Print parsed information for debugging
+			printQueryInfo(got)
+			if got.SplitQuery != nil {
+				gotQuery := sqlparser.String(got.SplitQuery.MainQuery)
+				if gotQuery != tc.expectedQuery {
+					t.Errorf("Expected query:\n%s\nGot:\n%s", tc.expectedQuery, gotQuery)
+				}
+			}
+		})
+	}
+}
+
+func printQueryInfo(qi *QueryInfo) {
+	fmt.Println("\nParsed SELECT Fields:")
+	for _, field := range qi.SelectFields {
+		if field.AggregateField != "" {
+			fmt.Printf("Aggregation: %s on field: %s, Raw: %s\n",
+				field.Field, field.AggregateField, field.Raw)
+		} else {
+			fmt.Printf("Table: %s, Field: %s, Raw: %s\n",
+				field.Table, field.Field, field.Raw)
+		}
+	}
+
+	fmt.Println("\nParsed WHERE Fields:")
+	for _, field := range qi.WhereFields {
+		printWhereField(field, 0)
+	}
+
+	if qi.SplitQuery != nil {
+		printSplitQueries(qi.SplitQuery)
+	}
+}
