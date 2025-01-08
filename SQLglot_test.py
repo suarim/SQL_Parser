@@ -179,13 +179,6 @@ def transform_query(input_query, schema, hierarchy):
                     ON {schema[present_tables[1]]['physical_name']}.user_id = {schema[present_tables[0]]['physical_name']}.id 
                 WHERE {transformed_where}
             )"""
-        
-    elif len(present_tables) == 3:
-        parsed_query = sqlglot.parse_one(input_query)
-        
-
-        
-        
 
 
 schema = {
@@ -255,7 +248,7 @@ heirarchy = {
 def main():
     # [Schema and hierarchy definitions remain the same]
 
-    input_query = "SELECT users.id from users WHERE users.id>5 AND orders.id > 2 OR orders.status = 'active'"
+    input_query = "SELECT users.id from users WHERE users.id > 5 AND orders.id > 2 OR orders.status = 'active'"
 
     print("Input Query:", input_query)
     try:
