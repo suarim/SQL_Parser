@@ -162,6 +162,7 @@ func TestQueryParser_ParseAndTransform(t *testing.T) {
 		expectedQuery string
 	}{
 		{
+			_________________________________done________________________________________-
 			name: "Simple Select",
 			query: `
         SELECT id, status
@@ -170,6 +171,9 @@ func TestQueryParser_ParseAndTransform(t *testing.T) {
 			metadata:      testMetadata,
 			expectedQuery: `select user_master.user_id, user_master.user_status from user_master where user_master.user_id in (select distinct user_master.user_id as id from user_master where user_master.user_status = 'active')`,
 		},
+		----------------------------------------done-------------------------------------
+			_________________________________done________________________________________-
+
 		{
 			name: "Simple Join",
 			query: `
@@ -179,6 +183,8 @@ func TestQueryParser_ParseAndTransform(t *testing.T) {
 			metadata:      testMetadata,
 			expectedQuery: `select user_master.user_id from user_master where user_master.user_id in ( select distinct user_master.user_id as id from user_master join order_details on order_details.user_id = user_master.id where order_details.order_amount > 100 )`,
 		},
+		----------------------------------------done-------------------------------------
+
 		{
 			name: "Private Object Query with Permissions",
 			query: `
@@ -268,6 +274,7 @@ func TestQueryParser_ParseAndTransform(t *testing.T) {
                 )`,
 		},
 		{
+
 			name: "Three Level Join Query",
 			query: `
                 SELECT name, orders.amount, orders.items.quantity

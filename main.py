@@ -1,48 +1,194 @@
 import sqlglot
-from sqlglot import exp, parse_one
+from sqlglot import expressions as exp
 
-def transform_where(where_clause, table):
-    transformed_where = []
-    conditions = where_clause.split('AND')
-    for condition in conditions:
-        condition = condition.strip()
-        # If the condition contains OR, handle it separately
-        if "OR" in condition:
-            sub_conditions = condition.split('OR')
-            transformed_sub_conditions = [(schema[table]["physical_name"] + "." + transform_condition(sub.strip(), table)) for sub in sub_conditions]
-            transformed_where.append(" OR ".join(transformed_sub_conditions))
+def extract_operators(expression):
+    operators = []
+
+    def traverse(node):
+        if isinstance(node, exp.Or):
+            conditions = {
+                'operator': 'OR',
+                'left': str(node.left),
+                'right': str(node.right)
+            }
+            operators.append(conditions)
+            traverse(node.left)
+            traverse(node.right)
+        elif isinstance(node, exp.And):
+            conditions = {
+                'operator': 'AND',
+                'left': str(node.left),
+                'right': str(node.right)
+            }
+            operators.append(conditions)
+            traverse(node.left)
+            traverse(node.right)
+        elif isinstance(node, (exp.GT, exp.LT, exp.GTE, exp.LTE, exp.EQ, exp.NEQ)):
+            operator_map = {
+                exp.GT: '>', exp.LT: '<',
+                exp.GTE: '>=', exp.LTE: '<=',
+                exp.EQ: '=', exp.NEQ: '!='
+            }
+            conditions = {
+                'operator': operator_map[type(node)],
+                'left': str(node.left),
+                'right': str(node.right)
+            }
+            operators.append(conditions)
+
+    traverse(expression)
+    return operators
+
+def transform_where_condition(condition, schema):
+    if isinstance(condition, (exp.GT, exp.LT, exp.GTE, exp.LTE, exp.EQ, exp.NEQ)):
+        left = condition.left
+        right = condition.right
+
+        # Define operator mapping
+        operator_map = {
+            exp.GT: '>',
+            exp.LT: '<',
+            exp.GTE: '>=',
+            exp.LTE: '<=',
+            exp.EQ: '=',
+            exp.NEQ: '!='
+        }
+
+        # Get the correct operator
+        operator = operator_map[type(condition)]
+
+        # Transform left side
+        if isinstance(left, exp.Column):
+            table_name = left.table
+            column_name = left.name
+            if table_name and column_name in schema[table_name]["columns"]:
+                left_transformed = f"{schema[table_name]['physical_name']}.{schema[table_name]['columns'][column_name]}"
+            else:
+                left_transformed = str(left)
         else:
-            transformed_where.append(schema[table]["physical_name"] + "." + transform_condition(condition, table))
-    return " AND ".join(transformed_where)
+            left_transformed = str(left)
 
+        # Transform right side
+        if isinstance(right, exp.Column):
+            table_name = right.table
+            column_name = right.name
+            if table_name and column_name in schema[table_name]["columns"]:
+                right_transformed = f"{schema[table_name]['physical_name']}.{schema[table_name]['columns'][column_name]}"
+            else:
+                right_transformed = str(right)
+        else:
+            right_transformed = str(right)
 
-def transform_condition(condition, table):
-    # Split the condition into column, operator, and value
-    parts = condition.split(maxsplit=2)
-    column = parts[0]
-    operator = parts[1]
-    value = parts[2] if len(parts) > 2 else ""
-    
-    # If the column is in the schema, transform it
-    if column in schema[table]["columns"]:
-        column = schema[table]["columns"][column]
-    
-    return f"{column} {operator} {value}"
+        return f"{left_transformed} {operator} {right_transformed}"
 
+    return str(condition)
 
-def transform_select(select_part, table):
+def transform_where_multiple_tables(where_expr, schema):
+    if not where_expr:
+        return ""
+
+    def transform_expression(expr):
+        if isinstance(expr, exp.Or):
+            left = transform_expression(expr.left)
+            right = transform_expression(expr.right)
+            return f"({left} OR {right})"
+        elif isinstance(expr, exp.And):
+            left = transform_expression(expr.left)
+            right = transform_expression(expr.right)
+            return f"({left} AND {right})"
+        else:
+            return transform_where_condition(expr, schema)
+
+    return transform_expression(where_expr)
+
+def transform_select(select_expressions, table, schema):
     transformed_select = []
-    for expr in select_part:
-        expr_str = str(expr)
-        # Check if the column exists in the schema for the table
-        if expr_str in schema[table]["columns"]:
-            transformed_select.append(schema[table]["physical_name"] + "." + schema[table]["columns"][expr_str])
-        else:
-            transformed_select.append(schema[table]["physical_name"] + "." + expr_str)
-    return ' , '.join(transformed_select)
+    for expr in select_expressions:
+        if isinstance(expr, exp.Column):
+            table_name = expr.table or table
+            column_name = expr.name
+            if column_name in schema[table_name]["columns"]:
+                transformed_select.append(
+                    f"{schema[table_name]['physical_name']}.{schema[table_name]['columns'][column_name]}"
+                )
+            else:
+                transformed_select.append(f"{schema[table_name]['physical_name']}.{column_name}")
+    return ", ".join(transformed_select)
+
+def get_tables_from_query(input_query,parsed_query):
+    slugs = ["users", "orders", "items", "categories"]
+    tokens=input_query.split()
+    print("Tokens----------->",tokens)
+    tables = []
+    for slug in slugs:
+        for token in tokens:
+            if slug in token:
+                if slug in tables:
+                    break
+                print(f"{slug} is present in query")
+                tables.append(slug)
 
 
-# Sample Schema
+    for table in parsed_query.find_all(exp.Table):
+        if table.name not in tables:
+            tables.append(table.name)
+    return tables
+
+def transform_query(input_query, schema, hierarchy):
+    parsed = sqlglot.parse_one(input_query)
+    slugs = ["users", "orders", "items", "categories"]
+    # Extract tables
+    present_tables = get_tables_from_query(input_query,parsed)
+    print("pt _____________>",present_tables)
+    # Extract SELECT expressions
+    select_expressions = parsed.args['expressions']
+
+    # Extract WHERE clause
+    where_clause = parsed.find(exp.Where)
+    where_expr = where_clause.this if where_clause else None
+
+    if len(present_tables) == 1:
+        table = present_tables[0]
+        transformed_select = transform_select(select_expressions, table, schema)
+
+        if not where_expr:
+            return f"SELECT {transformed_select} FROM {schema[table]['physical_name']}"
+
+        transformed_where = transform_where_multiple_tables(where_expr, schema)
+        return f"""
+        SELECT {transformed_select} 
+        FROM {schema[table]['physical_name']} 
+        WHERE {schema[table]['physical_name']}.{schema[table]['columns']['id']} IN (
+            SELECT DISTINCT {schema[table]['physical_name']}.{schema[table]['columns']['id']} AS id 
+            FROM {schema[table]['physical_name']} 
+            WHERE {transformed_where}
+        )"""
+
+    elif len(present_tables) == 2:
+        if abs(hierarchy[present_tables[0]] - hierarchy[present_tables[1]]) == 1:
+            transformed_select = transform_select(select_expressions, present_tables[0], schema)
+            transformed_where = transform_where_multiple_tables(where_expr, schema)
+            from_part = str(parsed.args['from'])
+            print("from-->",from_part)
+            table=from_part.split()[1]
+            print("table-->",table)
+            print("present tables-->",present_tables)
+            x = f"ON {[schema[table]['columns']['id']]}"
+            y=list(set(present_tables)-set([table]))[0]
+            print("y-->",y)
+            print("x-->",x)
+            return f"""
+            SELECT {transformed_select} 
+            FROM {schema[table]['physical_name']} 
+            WHERE {schema[table]['physical_name']}.{schema[table]['columns']['id']} IN (
+                SELECT DISTINCT {schema[table]['physical_name']}.{schema[table]['columns']['id']} AS id 
+                FROM {schema[table]['physical_name']} 
+                JOIN {schema[y]['physical_name']} 
+                    ON {schema[y]['physical_name']}.{schema[table]['columns']['id']} = {schema[table]['physical_name']}.id 
+                WHERE {transformed_where}
+            )"""
+
+
 schema = {
     "users": {
         "physical_name": "user_master",
@@ -101,32 +247,23 @@ schema = {
     },
 }
 
-slugs = ["users", "orders", "items", "categories"]
-input_query = "SELECT id,status FROM users WHERE status = 'active' OR id = 7"
+heirarchy = {
+    "users": 1,
+    "orders": 2,
+    "items": 3,
+    "categories": 4
+}
+def main():
+    # [Schema and hierarchy definitions remain the same]
 
-parsed = sqlglot.parse_one(input_query)
-from_part = str(parsed.args['from'])
-table = from_part.split()[1]
+    input_query = "SELECT items.id,categories.id from categories WHERE items.id > 5 AND categories.id > 2 OR items.status = 'active'"
+    # input_query = "SELECT name, orders.amount, orders.items.quantity FROM users WHERE orders.items.quantity > 5"
+    print("Input Query:", input_query)
+    try:
+        transformed = transform_query(input_query, schema, heirarchy)
+        print("Transformed Query:", transformed)
+    except Exception as e:
+        print(f"Error transforming query: {str(e)}")
 
-select_part = parsed.args['expressions']
-select_part_transformed = transform_select(select_part, table)
-print("Transformed SELECT:", select_part_transformed)
-
-where_part = " ".join(str(parsed.args.get('where')).split()[1:])
-print("WHERE clause:", where_part)
-
-tokens = input_query.split()
-present_tables_in_query = []
-
-for slug in slugs:
-    if slug in tokens:
-        present_tables_in_query.append(slug)
-print("Tables in query:", present_tables_in_query)
-
-if len(present_tables_in_query) == 1:
-    table = present_tables_in_query[0]
-    transformed_select = transform_select(parsed.args['expressions'], table)
-    transformed_where = transform_where(where_part, table)
-    transformed_query = f"SELECT {transformed_select} FROM {schema[table]['physical_name']} WHERE {schema[table]['physical_name']}.{schema[table]['columns']['id']} IN (SELECT DISTINCT {schema[table]['physical_name']}.{schema[table]['columns']['id']} AS id FROM {schema[table]['physical_name']} WHERE {transformed_where})"
-    print("Final Transformed Query:", transformed_query)
-
+if __name__ == "__main__":
+    main()

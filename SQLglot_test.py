@@ -168,33 +168,25 @@ def transform_query(input_query, schema, hierarchy):
         if abs(hierarchy[present_tables[0]] - hierarchy[present_tables[1]]) == 1:
             transformed_select = transform_select(select_expressions, present_tables[0], schema)
             transformed_where = transform_where_multiple_tables(where_expr, schema)
-            from_part = str(parsed.args['from'])
-            print("from-->",from_part)
-            table=from_part.split()[1]
-            print("table-->",table)
-            print("present tables-->",present_tables)
-            x = f"ON {[schema[table]['columns']['id']]}"
-            y=list(set(present_tables)-set([table]))[0]
-            print("y-->",y)
-            print("x-->",x)
+
             return f"""
             SELECT {transformed_select} 
-            FROM {schema[table]['physical_name']} 
-            WHERE {schema[table]['physical_name']}.{schema[table]['columns']['id']} IN (
-                SELECT DISTINCT {schema[table]['physical_name']}.{schema[table]['columns']['id']} AS id 
-                FROM {schema[table]['physical_name']} 
-                JOIN {schema[y]['physical_name']} 
-                    ON {schema[y]['physical_name']}.{schema[table]['columns']['id']} = {schema[table]['physical_name']}.id 
+            FROM {schema[present_tables[0]]['physical_name']} 
+            WHERE {schema[present_tables[0]]['physical_name']}.{schema[present_tables[0]]['columns']['id']} IN (
+                SELECT DISTINCT {schema[present_tables[0]]['physical_name']}.{schema[present_tables[0]]['columns']['id']} AS id 
+                FROM {schema[present_tables[0]]['physical_name']} 
+                JOIN {schema[present_tables[1]]['physical_name']} 
+                    ON {schema[present_tables[1]]['physical_name']}.user_id = {schema[present_tables[0]]['physical_name']}.id 
                 WHERE {transformed_where}
             )"""
+        
     elif len(present_tables) == 3:
-        print("present tables-->",present_tables)
         parsed_query = sqlglot.parse_one(input_query)
-        from_part = str(parsed_query.args['from']).split()[1]
-        transformed_select = transform_select(select_expressions, present_tables[0], schema)
-        print("from-->",from_part)
-        print("present tables-->",present_tables)
-        print("transformed select-->",transformed_select)
+        
+
+        
+        
+
 
 schema = {
     "users": {
@@ -263,9 +255,8 @@ heirarchy = {
 def main():
     # [Schema and hierarchy definitions remain the same]
 
-    input_query = "SELECT items.id,categories.id from categories WHERE items.id > 5 AND categories.id > 2 OR items.status = 'active'"
-    # input_query = "SELECT name, orders.amount, orders.items.quantity FROM users WHERE orders.items.quantity > 5"
-    input_query="SELECT name, orders.amount, orders.items.quantity FROM users WHERE orders.items.quantity > 5"
+    input_query = "SELECT users.id from users WHERE users.id>5 AND orders.id > 2 OR orders.status = 'active'"
+
     print("Input Query:", input_query)
     try:
         transformed = transform_query(input_query, schema, heirarchy)
